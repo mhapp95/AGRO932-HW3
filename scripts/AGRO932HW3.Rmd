@@ -1,0 +1,149 @@
+---
+title: "HW3"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd('..')
+```
+
+
+```{r q2, eval = FALSE}
+A <- matrix(c(5,6,3,4), nrow=2, byrow=T)
+Y <- matrix(c(3, -6), nrow=2, byrow=T)
+X <- solve(A) %*% Y
+X
+```
+
+```{r loblolly setup, eval = FALSE}
+library(data.table)
+
+Pheno <- fread("data/DATA_rootnum_age10_rootnum.csv")
+Geno <- fread("data/Snp_Data.csv")
+
+# phenotype QC
+na.index <-  which(is.na(Pheno$Derregressed_BV))
+Pheno <- Pheno[-na.index, ]
+y <- Pheno$Derregressed_BV
+y <- matrix(y, ncol=1)
+
+# genotype QC
+Geno <- Geno[Geno$Genotype %in% Pheno$Genotype, ]
+Geno <- Geno[,-1] # 861 x 4853
+Geno[Geno == -9] <- NA
+
+missing <- apply(Geno, 2, function(x){sum(is.na(x))/length(x)})
+maf <- apply(Geno, 2, function(x){
+  frq <- mean(x, na.rm=TRUE)/2
+  return(ifelse(frq > 0.5, 1-frq, frq))
+})
+
+idx1 <- which(missing > 0.2)
+idx2 <- which(maf < 0.05)
+idx <- unique(c(idx1, idx2))
+Geno_QC <- as.matrix(Geno[, -..idx])
+
+#impute missing markers
+Z <- matrix(0, ncol=ncol(Geno_QC), nrow=nrow(Geno_QC))
+for (j in 1:ncol(Geno_QC)){
+  Z[, j] <- ifelse(is.na(Geno_QC[, j]), mean(Geno_QC[, j], na.rm=TRUE), Geno_QC[, j])
+}
+
+#scale and center genotypes
+Zs <- scale(Z, center = TRUE, scale = TRUE)
+n <- nrow(Zs)
+m <- ncol(Zs)
+
+G <- tcrossprod(Zs) / ncol(Zs)
+G <- G + diag(n)*0.001
+
+```
+
+```{r loblolly GBLUP, eval = FALSE}
+
+lambda <- 4.087116 # fit$Ve / fit$Vm from rrBLUP
+Ginv <- solve(G)
+ones <- matrix(1, ncol=1, nrow=n)
+Z <- diag(n)
+LHS1 <- cbind(crossprod(ones), crossprod(ones, Z)) 
+LHS2 <- cbind(crossprod(Z, ones), crossprod(Z) +  Ginv*lambda)
+LHS <- rbind(LHS1, LHS2)
+RHS <- rbind( crossprod(ones, y), crossprod(Z, y) )
+sol <- solve(LHS, RHS)
+
+# 10 fold cross validation 
+correlations_gblup <- data.frame()
+for(i in seq(from=92, to=length(y), by=92)){
+n.trn <- 833
+j = i-91
+y.trn <- y[-c(j:i)]
+y.tst <- y[j:i]
+Zs.trn <- Zs[-c(j:i),]
+Zs.tst <- Zs[j:i,]
+ncol(Zs.trn)
+Gtrn <- tcrossprod(Zs.trn) / ncol(Zs.trn)
+Gtrn <- Gtrn + diag(n.trn)*0.001
+Gtst.trn <- tcrossprod(Zs.tst, Zs.trn) / ncol(Zs.tst)
+Ginv.trn <- solve(Gtrn)
+ones <- matrix(1, ncol=1, nrow=n.trn)
+Z <- diag(n.trn)
+LHS1 <- cbind(crossprod(ones), crossprod(ones, Z)) 
+LHS2 <- cbind(crossprod(Z, ones), crossprod(Z) +  Ginv.trn*lambda)
+LHS <- rbind(LHS1, LHS2)
+RHS <- rbind( crossprod(ones, y.trn), crossprod(Z,y.trn) )
+sol.trn <- solve(LHS, RHS)
+# prediction and correlation
+y.hat <- Gtst.trn %*% Ginv.trn %*% matrix(sol.trn[c(2:(n.trn+1))])
+correlations_gblup <- rbind(correlations_gblup, cor(y.hat, y[j:i]))
+}
+```
+
+```{r loblolly RR-BLUP, eval = FALSE}
+
+lambda <- 12566.89 # fit$Ve / fit$Vu from rrBLUP 
+ones <- matrix(1, ncol=1, nrow=n)
+I <- diag(m)
+LHS1 <- cbind(crossprod(ones), crossprod(ones, Zs)) 
+LHS2 <- cbind(crossprod(Zs, ones), crossprod(Zs) +  I*lambda)
+LHS <- rbind(LHS1, LHS2)
+RHS <- rbind( crossprod(ones, y), crossprod(Zs,y) )
+sol2 <- solve(LHS, RHS)
+
+# 10 fold cross validation 
+correlations_rrblup <- data.frame()
+for(i in seq(from=92, to=length(y), by=92)){
+n.trn <- 833
+j = i-91
+y.trn <- y[-c(j:i)]
+y.tst <- y[j:i]
+Zs.trn <- Zs[-c(j:i),]
+Zs.tst <- Zs[j:i,]
+ones <- matrix(1, ncol=1, nrow=n.trn)
+I <- diag(m)
+LHS1 <- cbind(crossprod(ones), crossprod(ones, Zs.trn)) 
+LHS2 <- cbind(crossprod(Zs.trn, ones), crossprod(Zs.trn) +  I*lambda)
+LHS <- rbind(LHS1, LHS2)
+RHS <- rbind( crossprod(ones, y.trn), crossprod(Zs.trn, y.trn) )
+sol.trn <- solve(LHS, RHS)
+# prediction
+y.hat2 <- Zs.tst %*% matrix(sol.trn[-1])
+correlations_rrblup <- rbind(correlations_rrblup, cor(y.hat2, y[j:i]))
+ }
+```
+
+```{r loblolly graphics, eval = FALSE}
+c <- rbind(correlations_gblup, correlations_rrblup)
+colnames(c) <- c("Prediction Accuracy")
+c$Model <- c(rep("GBLUP", 10), rep("RRBLUP", 10))
+
+library(ggplot2)
+
+p <- ggplot(c, aes(x = Model, y=`Prediction Accuracy`, fill = Model)) + 
+  geom_violin() + 
+  scale_fill_manual(values = c("steelblue", "plum")) +
+  labs(title="Model Prediction Accuracies") +
+  theme(legend.position = "none", text = element_text(size = 14),
+        axis.text=element_text(size = 14))
+ggsave("images/GS.accuracy.png", plot = p )
+```
